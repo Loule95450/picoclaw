@@ -2,11 +2,14 @@ package agent
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
+
+var resolvedImagePathTagRegex = regexp.MustCompile(`\[image:[^\s\]][^\]]*\]`)
 
 func messagesContainMedia(messages []providers.Message) bool {
 	for _, msg := range messages {
@@ -104,8 +107,20 @@ func sameCandidateSet(a, b []providers.FallbackCandidate) bool {
 	return true
 }
 
+func messagesContainMediaTurn(messages []providers.Message) bool {
+	for _, msg := range messages {
+		if len(msg.Media) > 0 {
+			return true
+		}
+		if resolvedImagePathTagRegex.MatchString(msg.Content) {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *Pipeline) routeMediaTurn(ts *turnState, exec *turnExecution) error {
-	if p == nil || ts == nil || ts.agent == nil || exec == nil || !hasMediaRefs(exec.callMessages) {
+	if p == nil || ts == nil || ts.agent == nil || exec == nil || !messagesContainMediaTurn(exec.callMessages) {
 		return nil
 	}
 
