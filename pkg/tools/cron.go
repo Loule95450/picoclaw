@@ -26,12 +26,13 @@ type JobExecutor interface {
 
 // CronTool provides scheduling capabilities for the agent
 type CronTool struct {
-	cronService  *cron.CronService
-	executor     JobExecutor
-	msgBus       *bus.MessageBus
-	execTool     *ExecTool
-	allowCommand bool
-	execEnabled  bool
+	cronService           *cron.CronService
+	executor              JobExecutor
+	msgBus                *bus.MessageBus
+	execTool              *ExecTool
+	allowCommand          bool
+	execEnabled           bool
+	commandAllowedRemotes []string
 }
 
 // NewCronTool creates a new CronTool
@@ -42,9 +43,11 @@ func NewCronTool(
 ) (*CronTool, error) {
 	allowCommand := true
 	execEnabled := true
+	var commandAllowedRemotes []string
 	if config != nil {
 		allowCommand = config.Tools.Cron.AllowCommand
 		execEnabled = config.Tools.Exec.Enabled
+		commandAllowedRemotes = config.Tools.Cron.CommandAllowedRemotes
 	}
 
 	var execTool *ExecTool
@@ -60,12 +63,13 @@ func NewCronTool(
 		execTool.SetTimeout(execTimeout)
 	}
 	return &CronTool{
-		cronService:  cronService,
-		executor:     executor,
-		msgBus:       msgBus,
-		execTool:     execTool,
-		allowCommand: allowCommand,
-		execEnabled:  execEnabled,
+		cronService:           cronService,
+		executor:              executor,
+		msgBus:                msgBus,
+		execTool:              execTool,
+		allowCommand:          allowCommand,
+		execEnabled:           execEnabled,
+		commandAllowedRemotes: commandAllowedRemotes,
 	}, nil
 }
 
@@ -217,8 +221,10 @@ func (t *CronTool) addJob(ctx context.Context, args map[string]any) *ToolResult 
 		if !t.execEnabled {
 			return ErrorResult("command execution is disabled")
 		}
-		if !constants.IsInternalChannel(channel) {
-			return ErrorResult("scheduling command execution is restricted to internal channels")
+		if !constants.IsInternalChannel(channel) && !isCommandAllowedRemote(channel, chatID, t.commandAllowedRemotes) {
+			return ErrorResult(
+				"scheduling command execution is restricted to internal channels or configured remote channels",
+			)
 		}
 		if !t.allowCommand && !commandConfirm {
 			return ErrorResult("command_confirm=true is required when allow_command is disabled")
@@ -483,17 +489,44 @@ func positiveSeconds(args map[string]any, key string) (int64, *ToolResult) {
 }
 
 func (t *CronTool) validateCommandMutation(ctx context.Context, args map[string]any) *ToolResult {
+	channel := ToolChannel(ctx)
+	chatID := ToolChatID(ctx)
 	if !t.execEnabled {
 		return ErrorResult("command execution is disabled")
 	}
-	if !constants.IsInternalChannel(ToolChannel(ctx)) {
-		return ErrorResult("updating command execution is restricted to internal channels")
+	if !constants.IsInternalChannel(channel) && !isCommandAllowedRemote(channel, chatID, t.commandAllowedRemotes) {
+		return ErrorResult(
+			"updating command execution is restricted to internal channels or configured remote channels",
+		)
 	}
 	commandConfirm, _ := args["command_confirm"].(bool)
 	if !t.allowCommand && !commandConfirm {
 		return ErrorResult("command_confirm=true is required when allow_command is disabled")
 	}
 	return nil
+}
+
+func isCommandAllowedRemote(channel, chatID string, allowed []string) bool {
+	if channel == "" {
+		return false
+	}
+
+	target := channel
+	if chatID != "" {
+		target = channel + ":" + chatID
+	}
+
+	for _, entry := range allowed {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if entry == "*" || entry == channel || entry == target {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (t *CronTool) canAccessJob(ctx context.Context, job *cron.CronJob) bool {

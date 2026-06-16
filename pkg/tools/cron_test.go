@@ -87,7 +87,7 @@ func parseCronJobResult(t *testing.T, result *ToolResult) cron.CronJob {
 	return job
 }
 
-// TestCronTool_CommandBlockedFromRemoteChannel verifies command scheduling is restricted to internal channels
+// TestCronTool_CommandBlockedFromRemoteChannel verifies command scheduling is restricted by default.
 func TestCronTool_CommandBlockedFromRemoteChannel(t *testing.T) {
 	tool := newTestCronTool(t)
 	ctx := WithToolContext(context.Background(), "telegram", "chat-1")
@@ -102,8 +102,148 @@ func TestCronTool_CommandBlockedFromRemoteChannel(t *testing.T) {
 	if !result.IsError {
 		t.Fatal("expected command scheduling to be blocked from remote channel")
 	}
-	if !strings.Contains(result.ForLLM, "restricted to internal channels") {
-		t.Errorf("expected 'restricted to internal channels', got: %s", result.ForLLM)
+	if !strings.Contains(result.ForLLM, "restricted to internal channels or configured remote channels") {
+		t.Errorf("expected remote restriction message, got: %s", result.ForLLM)
+	}
+}
+
+func TestCronTool_CommandAllowedFromRemoteChannelAllowlist(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Tools.Cron.CommandAllowedRemotes = []string{"telegram"}
+
+	tool := newTestCronToolWithConfig(t, cfg)
+	ctx := WithToolContext(context.Background(), "telegram", "chat-1")
+	result := tool.Execute(ctx, map[string]any{
+		"action":     "add",
+		"message":    "check disk",
+		"command":    "df -h",
+		"at_seconds": float64(60),
+	})
+
+	if result.IsError {
+		t.Fatalf("expected command scheduling from allowed remote channel to succeed, got: %s", result.ForLLM)
+	}
+}
+
+func TestCronTool_CommandAllowedFromRemoteChatIDAllowlist(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Tools.Cron.CommandAllowedRemotes = []string{" telegram:1234567890 "}
+
+	tool := newTestCronToolWithConfig(t, cfg)
+	ctx := WithToolContext(context.Background(), "telegram", "1234567890")
+	result := tool.Execute(ctx, map[string]any{
+		"action":     "add",
+		"message":    "check disk",
+		"command":    "df -h",
+		"at_seconds": float64(60),
+	})
+
+	if result.IsError {
+		t.Fatalf("expected command scheduling from allowed remote chat to succeed, got: %s", result.ForLLM)
+	}
+}
+
+func TestCronTool_CommandAllowedFromRemoteWildcardAllowlist(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Tools.Cron.CommandAllowedRemotes = []string{"*"}
+
+	tool := newTestCronToolWithConfig(t, cfg)
+	ctx := WithToolContext(context.Background(), "telegram", "chat-1")
+	result := tool.Execute(ctx, map[string]any{
+		"action":     "add",
+		"message":    "check disk",
+		"command":    "df -h",
+		"at_seconds": float64(60),
+	})
+
+	if result.IsError {
+		t.Fatalf("expected wildcard allowlist to allow remote command scheduling, got: %s", result.ForLLM)
+	}
+}
+
+func TestCronTool_CommandAllowedRemoteWildcardRequiresNonEmptyChannel(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Tools.Cron.CommandAllowedRemotes = []string{"*"}
+
+	tool := newTestCronToolWithConfig(t, cfg)
+	ctx := WithToolContext(context.Background(), "", "chat-1")
+	result := tool.Execute(ctx, map[string]any{
+		"action":     "add",
+		"message":    "check disk",
+		"command":    "df -h",
+		"at_seconds": float64(60),
+	})
+
+	if !result.IsError {
+		t.Fatal("expected missing channel to remain blocked even with wildcard allowlist")
+	}
+	if !strings.Contains(result.ForLLM, "no session context") {
+		t.Errorf("expected session context error, got: %s", result.ForLLM)
+	}
+}
+
+func TestCronTool_CommandBlockedFromDifferentRemoteChatID(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Tools.Cron.CommandAllowedRemotes = []string{"telegram:1234567890"}
+
+	tool := newTestCronToolWithConfig(t, cfg)
+	ctx := WithToolContext(context.Background(), "telegram", "other-chat")
+	result := tool.Execute(ctx, map[string]any{
+		"action":          "add",
+		"message":         "check disk",
+		"command":         "df -h",
+		"command_confirm": true,
+		"at_seconds":      float64(60),
+	})
+
+	if !result.IsError {
+		t.Fatal("expected command scheduling from non-allowlisted remote chat to fail")
+	}
+	if !strings.Contains(result.ForLLM, "restricted to internal channels or configured remote channels") {
+		t.Errorf("expected remote restriction message, got: %s", result.ForLLM)
+	}
+}
+
+func TestCronTool_CommandAllowedRemoteRequiresConfirmWhenAllowCommandDisabled(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Tools.Cron.AllowCommand = false
+	cfg.Tools.Cron.CommandAllowedRemotes = []string{"telegram"}
+
+	tool := newTestCronToolWithConfig(t, cfg)
+	ctx := WithToolContext(context.Background(), "telegram", "chat-1")
+	result := tool.Execute(ctx, map[string]any{
+		"action":     "add",
+		"message":    "check disk",
+		"command":    "df -h",
+		"at_seconds": float64(60),
+	})
+
+	if !result.IsError {
+		t.Fatal("expected allowlisted remote command scheduling to require confirm when allow_command is disabled")
+	}
+	if !strings.Contains(result.ForLLM, "command_confirm=true") {
+		t.Errorf("expected command_confirm requirement message, got: %s", result.ForLLM)
+	}
+}
+
+func TestCronTool_AllowCommandDoesNotBypassRemoteAllowlist(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Tools.Cron.AllowCommand = true
+
+	tool := newTestCronToolWithConfig(t, cfg)
+	ctx := WithToolContext(context.Background(), "telegram", "chat-1")
+	result := tool.Execute(ctx, map[string]any{
+		"action":     "add",
+		"message":    "check disk",
+		"command":    "df -h",
+		"at_seconds": float64(60),
+	})
+
+	if !result.IsError {
+		t.Fatal("expected allow_command=true not to bypass remote allowlist")
+	}
+	if !strings.Contains(result.ForLLM, "restricted to internal channels or configured remote channels") {
+		t.Errorf("expected remote restriction message, got: %s", result.ForLLM)
 	}
 }
 
